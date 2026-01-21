@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Dynamic Loading</title>
+    <meta charset="UTF-8" />
+
+    <script>
+      // Helper / Parser functions
+      const csvToObject = (str) => {
+        const arr = []; // string[][]
+        let quote = false; // 'true' means we're inside a quoted field
+
+        // Iterate over each character, keep track of current row and column (of the returned array)
+        for (let row = 0, col = 0, c = 0; c < str.length; c++) {
+          const cc = str[c],
+            nc = str[c + 1]; // Current character, next character
+
+          if (!arr[row]) arr[row] = []; // Create a new row if necessary
+          arr[row][col] = arr[row]?.[col] ?? ""; // Create a new column (start with empty string) if necessary
+
+          // If the current character is a quotation mark, and we're inside a
+          // quoted field, and the next character is also a quotation mark,
+          // add a quotation mark to the current column and skip the next character
+          if (cc === '"' && quote && nc === '"') {
+            arr[row][col] += cc;
+            ++c;
+            continue;
+          }
+
+          // If it's just one quotation mark, begin/end quoted field
+          if (cc === '"') {
+            quote = !quote;
+            continue;
+          }
+
+          // If it's a comma and we're not in a quoted field, move on to the next column
+          if (cc === "," && !quote && nc !== "\r" && nc !== "\n") {
+            ++col;
+            continue;
+          }
+
+          // If it's a newline (CRLF) and we're not in a quoted field, skip the next character
+          // and move on to the next row and move to column 0 of that new row
+          if (cc === "\r" && nc === "\n" && !quote) {
+            ++row;
+            col = 0;
+            ++c;
+            continue;
+          }
+
+          // If it's a newline (LF or CR) and we're not in a quoted field,
+          // move on to the next row and move to column 0 of that new row
+          if (cc === "\n" && !quote) {
+            ++row;
+            col = 0;
+            continue;
+          }
+          if (cc === "\r" && !quote) {
+            ++row;
+            col = 0;
+            continue;
+          }
+
+          // Otherwise, append the current character to the current column
+          arr[row][col] += cc;
+        }
+
+        return arr;
+      };
+      const domParse = (html) =>
+        new DOMParser().parseFromString(html, "text/html").body.firstChild;
+    </script>
+
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      #wrapper {
+        width: 100%;
+        display: flex;
+      }
+      iframe {
+        width: 75%;
+      }
+
+      #ui {
+        width: 25%;
+        display: flex;
+        flex-direction: column;
+      }
+      #ui select {
+        max-width: 200px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="wrapper">
+      <section id="ui">
+        <h1 id="name">PoC dynamic loading</h1>
+      </section>
+      <iframe
+        id="VECTARY_EMBED_ID"
+        src="https://www.vectary.com/p/3ADUyNx1VERERfOOLzAdQ2"
+        frameborder="0"
+        width="100%"
+        height="720"
+        allowfullscreen
+      ></iframe>
+    </div>
+
+    <script>
+      var modelApi = null;
+    </script>
+
+    <script type="module">
+      /* Import and initialize the VctrModelApi */
+      import { VctrModelApi } from "https://www.vectary.com/studio-lite/scripts/api.js";
+      modelApi = new VctrModelApi("VECTARY_EMBED_ID");
+      const initPromise = modelApi.init(); // We can use this promise to await when we will need it, without blocking the main thread
+
+      const materialsData = new Map();
+      const variantsData = new Map();
+
+      const _3dFilesCache = new Map();
+      const _3dObjectsCache = new Map();
+      let prevObjectId = null; // Track last visible object to toggle visibility when switching (if needed)
+
+      /* Get the data from the spreadsheet and transform it to a JS object so we can work with it */
+      // Use local CSV files instead of Google Sheets
+      const publishedCsvMaterialsUrl = "./vectary/Vectary_Materials.csv";
+      const publishedCsvVariantsUrl = "./vectary/Vectary_Products_Variants.csv";
+
+      const csvMaterialsPromise = fetch(publishedCsvMaterialsUrl).then(
+        (res) => {
+          if (res.status === 200) {
+            return res.text();
+          } else {
+            console.warn(`Couldn't fetch the data. Error code ${res.status}`);
+          }
+        }
+      );
+      const csvVariantsPromise = fetch(publishedCsvVariantsUrl).then((res) => {
+        if (res.status === 200) {
+          return res.text();
+        } else {
+          console.warn(`Couldn't fetch the data. Error code ${res.status}`);
+        }
+      });
+
+      const [csvMatData, csvVarData] = await Promise.all([
+        csvMaterialsPromise,
+        csvVariantsPromise,
+      ]);
+      const matData = csvToObject(csvMatData);
+      const varData = csvToObject(csvVarData);
+
+      // If we have another way to get the project/product name, we can use that instead of
+      // waiting for the project to be initialized
+      await initPromise;
+      const projectName = modelApi.projectInfo.projectName;
+
+      const materialColumnNames = matData.shift();
+      matData.forEach((row, i) => {
+        const name = row[0];
+
+        // We could create these programmatically from the `columnNames`,
+        // but it's easier, and clearer, to define them directly
+        const item = {
+          type: row[1], // Second column is the "type"
+          color_options: row[2].split(",").map((p) => p.trim()), // Third column is the "color_options"
+          applications: row[3].split(",").map((p) => p.trim()), // Fourth column is the "applications"
+          products: row[4].split(",").map((p) => p.trim()), // Fifth column is the "products"
+          _3d_file: row[5], // Sixth column is the "_3d_file"
+          download_link: row[6], // Seventh column is the "download_link"
+        };
+
+        // We filter all the materials that are specified for the current project/product
+        if (item.products.includes(projectName)) {
+          materialsData.set(name, item);
+        }
+      });
+
+      const variantColumnNames = varData.shift();
+      varData.forEach((row, i) => {
+        const name = row[0];
+        const item = {
+          variants: row[1].split(",").map((p) => p.trim()),
+          applications: row[2].split(",").map((p) => p.trim()),
+        };
+
+        // Ensure additional applications are always present for this product
+        if (name === "Freedom_headrest") {
+          const extraApplications = [
+            "fabric_seat",
+            "fabric_headrest",
+            "fabric_backrest",
+          ];
+          extraApplications.forEach((app) => {
+            if (!item.applications.includes(app)) {
+              item.applications.push(app);
+            }
+          });
+        }
+
+        // We filter all the variants that are specified for the current project/product
+        if (name === projectName) {
+          variantsData.set(name, item);
+          return;
+        }
+      });
+      console.log("matData:", matData);
+      console.log("varData:", varData);
+
+      // Create the UI elements
+      const productVariantInfo = variantsData.get(projectName);
+
+      // Variants section
+      if (productVariantInfo.variants.length > 0) {
+        // We create the sections based on the product variants
+        const section = document.createElement("section");
+        document.getElementById("ui").appendChild(section);
+
+        const h2 = document.createElement("h2");
+        h2.textContent = "Variants";
+        section.appendChild(h2);
+
+        const select = document.createElement("select");
+        select.id = "variants";
+        section.appendChild(select);
+
+        for (const variant of productVariantInfo.variants) {
+          const option = document.createElement("option");
+          option.value = variant;
+          option.textContent = variant;
+          select.appendChild(option);
+        }
+
+        select.addEventListener("change", async (e) => {
+          // Need to trigger the change of the variant somehow
+          console.log("variant changed to:", e.target.value);
+          // This would be one way of doing it, but it's not the only one
+          await modelApi.setConfigurationState([
+            {
+              variant: "Variants", // "Variants" object must exist in the model
+              active_object: e.target.value,
+            },
+          ]);
+        });
+      }
+
+      // Materials section
+      for (const application of productVariantInfo.applications) {
+        const section = document.createElement("section");
+        document.getElementById("ui").appendChild(section);
+
+        const h2 = document.createElement("h2");
+        h2.textContent = application;
+        section.appendChild(h2);
+
+        const select = document.createElement("select");
+        select.id = application;
+        section.appendChild(select);
+        const o = document.createElement("option");
+        o.textContent = "Choose a material";
+        o.value = "";
+        select.appendChild(o);
+
+        // search in the materialsData for the materials with matching applications
+        const materials = Array.from(materialsData.entries()).filter(
+          ([name, item]) => item.applications.includes(application)
+        );
+        console.log("materials for application:", application, materials);
+
+        for (const [name, item] of materials) {
+          // We need to create an option group where the label is the name, and the options are the color options
+          const optionGroup = document.createElement("optgroup");
+          optionGroup.label = name;
+          select.appendChild(optionGroup);
+
+          for (const colorOption of item.color_options) {
+            const option = document.createElement("option");
+            option.value = `${name}-${colorOption}`; // We will use this value to identify the file/material to load
+            option.textContent = colorOption;
+            optionGroup.appendChild(option);
+          }
+        }
+
+        select.addEventListener("change", async (e) => {
+          console.log("material changed to:", e.target.value);
+          const [name, colorOption] = e.target.value.split("-");
+
+          const databaseMaterial = materialsData.get(name);
+          const vectaryMaterial = (
+            await loadItem(databaseMaterial)
+          ).materials.find((m) => m.name === colorOption);
+          console.log("vectaryMaterial:", vectaryMaterial);
+
+          // Apply the material to all the objects with matching name as the current application
+          const objects = await modelApi.getObjects([application]);
+          for (const object of objects) {
+            modelApi.addOrEditMaterial(object.id, vectaryMaterial);
+          }
+        });
+      }
+
+      async function loadItem(item) {
+        const _3dFileURL = item?.download_link; // local relative path (e.g. ./vectary/3d_files/black_metal.vctr3)
+        if (!_3dFileURL) {
+          console.warn("No 3d file URL found for item:", item?._3d_file);
+          return;
+        }
+
+        let currentObject = null;
+        if (!_3dFilesCache.has(_3dFileURL)) {
+          console.warn("Fetching new local 3D file, this can take a while...");
+
+          // Directly fetch the local vctr3 file from the path in the CSV
+          const response = await fetch(_3dFileURL);
+          if (!response.ok) {
+            let bodyText = await response.text();
+            console.error("Error fetching 3D file:", bodyText);
+            return;
+          }
+          const _3dFileBlob = await response.blob();
+
+          const namedFile = new File([_3dFileBlob], item._3d_file, {
+            type: "model/vctr3",
+          });
+          _3dFilesCache.set(_3dFileURL, namedFile);
+
+          await initPromise;
+
+          if (prevObjectId) {
+            modelApi.toggleVisibility([prevObjectId], false);
+          }
+
+          await modelApi.importFiles(
+            _3dFilesCache.get(_3dFileURL),
+            2 // allows for importing vctr3 files as individual components
+          );
+          const latestImports = await modelApi.getObjects();
+          currentObject = latestImports[latestImports.length - 1];
+          console.log("currentObject", currentObject);
+          _3dObjectsCache.set(_3dFileURL, currentObject);
+        } else {
+          currentObject = _3dObjectsCache.get(_3dFileURL);
+
+          if (
+            prevObjectId &&
+            currentObject &&
+            prevObjectId !== currentObject?.id
+          ) {
+            modelApi.toggleVisibility([prevObjectId], false);
+            modelApi.toggleVisibility([currentObject.id], true);
+          }
+        }
+
+        prevObjectId = currentObject?.id || prevObjectId;
+        return currentObject;
+      }
+    </script>
+  </body>
+</html>
